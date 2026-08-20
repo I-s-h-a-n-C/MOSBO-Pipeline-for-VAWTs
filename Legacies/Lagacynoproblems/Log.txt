@@ -1,0 +1,25 @@
+I created 1 blade profile for NACA 0018 with a 60 degree twist and a .3 solidity
+I then created an algorithm that generated 80 blade profiles varying by twist by each 15 degrees and solidity by .03
+I then created a differential evolution algorithm that tells me the best one
+I then realized it did not have enough data when my ai was very inaccurate
+I then created a new algorithm to procedurally generate 400 blade profiles by varying twist by 5 degrees and solidity by .02
+I then ran the simulations on all 400 blades and exported this csv into my new ai
+I then trained this ai to figure out the most optimal design for Cp
+I then added ability for this ai to predict Cp from given solidity, twist, and wind speed
+I then realized that it did not have Rotor torque data
+I then got all the Azimuthal angle to torque data
+I then decided on a Non-dominated Sorting Genetic Algorithm to output a complete Pareto Front
+I then realized that I should also add data for NACA 0015 and let the AI interpolate to find the best airfoil as well
+I then realized that I had made a mistake and that my data is for non turbulent wind on accident
+I then realized that having multiple airfoil designs would be better than one, so it can better determine the best blades
+I procedurally generated 800 unique blade profiles
+I toned the Ncrit down to 3 for turbulent wind
+I set wind speed to 5mph based on the NOAA mean wind data for Tennessee
+I ran all 800 simulations for the power coefficient (Cp) and rotor torque
+I remodeled the algorithm to incorporate uncertainty
+I tested different kernels each time it runs
+It generates a full pareto front, and optimized and a historical
+Realized it didn't have enough data, increased from 800->3600 procedurally generated blades across 4 airfoils and more solidities
+AI was underfitting, made sure to trap SLSQP in a localized bounding box
+Fixed the Gaussian Process banding
+Realized I had too much data for Gaussian process regression, changed to random forest

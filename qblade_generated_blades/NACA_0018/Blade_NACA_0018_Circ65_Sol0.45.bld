@@ -1,0 +1,26 @@
+----------------------------------------QBlade Blade Definition File------------------------------------------------
+Generated with : QBlade CE v2.0.9.7b_beta windows
+Archive Format: 310043
+Time : 12:06:33
+Date : 08.08.2026
+
+----------------------------------------Object Name-----------------------------------------------------------------
+Blade_NACA_0018_Circ65_Sol0.45                     OBJECTNAME         - the name of the blade object
+
+----------------------------------------Parameters------------------------------------------------------------------
+VAWT                                               ROTORTYPE          - the rotor type
+false                                              INVERTEDFOILS      - invert the airfoils? (only VAWT) [bool]
+3                                                  NUMBLADES          - number of blades
+
+----------------------------------------Blade Data------------------------------------------------------------------
+HEIGHT_[m]          CHORD_[m]           RADIUS_[m]          OFFSET_Y_[m]        TWIST_[deg]         CIRCANGLE_[deg]     P_AXIS_Y_[-]        POLAR_FILE          
+0.00000             0.07500             0.50000             0.00000             0.00                0.00                0.50000             Polars/NACA_0018_MultiRePolar.plr
+0.11111             0.07500             0.50000             0.00000             0.00                7.22                0.50000             Polars/NACA_0018_MultiRePolar.plr
+0.22222             0.07500             0.50000             0.00000             0.00                14.44               0.50000             Polars/NACA_0018_MultiRePolar.plr
+0.33333             0.07500             0.50000             0.00000             0.00                21.67               0.50000             Polars/NACA_0018_MultiRePolar.plr
+0.44444             0.07500             0.50000             0.00000             0.00                28.89               0.50000             Polars/NACA_0018_MultiRePolar.plr
+0.55556             0.07500             0.50000             0.00000             0.00                36.11               0.50000             Polars/NACA_0018_MultiRePolar.plr
+0.66667             0.07500             0.50000             0.00000             0.00                43.33               0.50000             Polars/NACA_0018_MultiRePolar.plr
+0.77778             0.07500             0.50000             0.00000             0.00                50.56               0.50000             Polars/NACA_0018_MultiRePolar.plr
+0.88889             0.07500             0.50000             0.00000             0.00                57.78               0.50000             Polars/NACA_0018_MultiRePolar.plr
+1.00000             0.07500             0.50000             0.00000             0.00                65.00               0.50000             Polars/NACA_0018_MultiRePolar.plr
