@@ -150,7 +150,22 @@ def clean_dataset(df, target_col, min_val, max_val=None):
             # HARD OVERRIDE: Never drop the absolute minimums and maximums (crucial for Pareto!)
             is_min = df[target_col] == df[target_col].min()
             is_max = df[target_col] == df[target_col].max()
-            
+
+            # DIAGNOSTIC (FIX): This override can force-keep a min/max row even
+            # when it's a severe z-score outlier (e.g. a parser artifact). That
+            # single row can skew scaler_y (mean/std used to normalize the
+            # target) and sits in sparse input space, so the GP naturally
+            # assigns it high sigma -- one likely source of the long
+            # uncertainty whiskers on the regression plot. We still keep the
+            # boundary rows (Pareto needs them), but now flag them so it's
+            # visible when they're worth a manual sanity check.
+            forced_outliers = (is_min | is_max) & ~is_valid_z
+            if forced_outliers.any():
+                print(f" -> ⚠️  {target_col.upper()}: {forced_outliers.sum()} boundary row(s) "
+                      f"(min/max) forced past the z-score filter -- verify these aren't parser artifacts:")
+                cols_to_show = [c for c in ['thickness', 'twist', 'solidity', 'tsr', target_col] if c in df.columns]
+                print(df.loc[forced_outliers, cols_to_show].to_string(index=False))
+
             # Keep row if it's statistically valid OR if it's an extreme boundary condition
             df = df[is_valid_z | is_min | is_max]
     

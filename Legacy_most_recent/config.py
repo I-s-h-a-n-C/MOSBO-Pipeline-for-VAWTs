@@ -53,3 +53,14 @@ LAMBDA_PENALTY = 0.25
 POPULATION_SIZE = 500
 OFFSPRING_SIZE = 250
 GENERATIONS = 250
+
+# Hard TRF ceiling used consistently across the pipeline:
+#  - NSGA-II inequality constraint (RiskAwareVAWTProblem)
+#  - SLSQP local-refinement constraint (trf_constraint)
+#  - Post-optimization hard filter on the final Pareto export
+# FIX: Previously NSGA-II/SLSQP allowed TRF <= 2.0 while the final export
+# filtered to TRF <= 1.5, silently dropping a large chunk of the discovered
+# front (including much of the high-Cp end) before it ever reached the
+# comparison plot or the CSV export. Keeping this in one place prevents
+# that mismatch from reappearing.
+TRF_PARETO_LIMIT = 1.5

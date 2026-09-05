@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -12,6 +13,52 @@ import config
 import data_loader
 import surrogates
 import hybrid_optimizer
+import web_wind_tunnel 
+
+def safe_savefig(filepath, retries=2, retry_delay=1.5, **savefig_kwargs):
+    """
+    FIX: Wraps plt.savefig with Windows-friendly diagnostics and graceful
+    failure handling. A single locked/in-use file (common on Windows when
+    the PNG is open in a viewer, or the folder is a OneDrive-synced
+    Downloads directory holding the file as a cloud placeholder mid-sync)
+    used to raise OSError: [Errno 22] Invalid argument and kill the entire
+    pipeline -- discarding hours of GP training + NSGA-II optimization over
+    one image write. This retries briefly, then logs a clear diagnosis and
+    lets the run continue so the remaining figures and the Pareto CSV
+    export aren't lost.
+    Returns True on success, False if the figure could not be saved.
+    """
+    abs_path = os.path.abspath(filepath)
+    folder = os.path.dirname(abs_path)
+
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except FileExistsError:
+        print(f" -> ❌ '{folder}' exists but is a file, not a directory. "
+              f"Rename/remove it, then re-run.")
+        plt.close()
+        return False
+
+    last_err = None
+    for attempt in range(1, retries + 2):  # e.g. retries=2 -> 3 total attempts
+        try:
+            plt.savefig(abs_path, **savefig_kwargs)
+            print(f"    Saved: {abs_path}")
+            plt.close()
+            return True
+        except OSError as e:
+            last_err = e
+            if attempt <= retries:
+                time.sleep(retry_delay)
+
+    print(f" -> ❌ Failed to save '{abs_path}' after {retries + 1} attempt(s): {last_err}")
+    print("    Common Windows causes: the file is open in another program (image")
+    print("    viewer / Explorer preview), a cloud-sync client (OneDrive) is holding")
+    print("    it as a placeholder mid-sync, or antivirus is scanning/locking it.")
+    print("    Close any viewer on this file, pause OneDrive sync for this folder,")
+    print("    or re-run -- continuing with the rest of the pipeline.")
+    plt.close()
+    return False
 
 def generate_regression_figures(builder, df, target_col, inputs):
     """
@@ -48,7 +95,15 @@ def generate_regression_figures(builder, df, target_col, inputs):
                 linewidth=0.8, s=40, zorder=2, label='Predicted Mean')
     
     # 1:1 Identity Line with dynamic bounds
-    min_val, max_val = min(y_actual), max(y_actual)
+    # FIX: Previously bounds were computed from y_actual only, so any point
+    # whose prediction +/- 1.96*sigma extended past the actual-value range
+    # got its error bar visibly clipped at the plot edge -- reading as
+    # "long lines running off the chart" even when sigma wasn't that extreme.
+    # Now the CI whiskers and predicted means are included in the bounds.
+    ci_lower = y_pred - 1.96 * y_sigma
+    ci_upper = y_pred + 1.96 * y_sigma
+    min_val = min(y_actual.min(), y_pred.min(), ci_lower.min())
+    max_val = max(y_actual.max(), y_pred.max(), ci_upper.max())
     margin = (max_val - min_val) * 0.05
     ax1.plot([min_val - margin, max_val + margin], 
              [min_val - margin, max_val + margin], 'k--', lw=2, zorder=3, label='Perfect Model')
@@ -76,9 +131,7 @@ def generate_regression_figures(builder, df, target_col, inputs):
     os.makedirs("figures", exist_ok=True)
     filepath = os.path.join("figures", f"{builder.target_name}_Regression_Analysis.png")
     plt.tight_layout()
-    plt.savefig(filepath, dpi=300)
-    plt.close()
-    print(f"    Saved: {filepath}")
+    safe_savefig(filepath, dpi=300)
 
 def generate_ard_sensitivity_figure(builder):
     """
@@ -125,9 +178,7 @@ def generate_ard_sensitivity_figure(builder):
     os.makedirs("figures", exist_ok=True)
     filepath = os.path.join("figures", f"{builder.target_name}_ARD_Sensitivity.png")
     plt.tight_layout()
-    plt.savefig(filepath, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"    Saved: {filepath}")
+    safe_savefig(filepath, dpi=300, bbox_inches='tight')
 
 def extract_raw_pareto_front(df_cp, df_trf):
     """Calculates non-dominated Pareto front from raw pre-optimization CFD dataset."""
@@ -146,6 +197,86 @@ def extract_raw_pareto_front(df_cp, df_trf):
 
     df_raw_pareto = merged[is_pareto].sort_values(by='cp', ascending=False).reset_index(drop=True)
     return merged, df_raw_pareto
+
+def log_median_performance_summary(df_cp, df_trf, df_raw_pareto, df_pareto, output_dir="output",
+                                    log_filename="Median_Performance_Log.txt"):
+    """
+    Stage 15: Appends a timestamped summary of median Cp/TRF performance to a
+    persistent text log, tracking three stages of the pipeline:
+      1. All Designs               - every cleaned CFD design point (df_cp / df_trf)
+      2. Pre-Optimization Pareto   - the raw, non-dominated baseline front (df_raw_pareto)
+      3. Improved Designs          - the final NSGA-II + SLSQP optimized Pareto front (df_pareto)
+
+    The file is opened in append mode, never overwritten, so every concluded run
+    (successful or not) adds a new dated entry to the same log rather than
+    replacing the previous one. Safe to call even if optimization failed
+    (df_raw_pareto / df_pareto may be None or empty) -- those sections are
+    reported as N/A instead of raising an error.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(output_dir, log_filename)
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _fmt(val):
+        return f"{val:.6f}" if val is not None and not (isinstance(val, float) and np.isnan(val)) else "N/A"
+
+    lines = []
+    lines.append("=" * 70)
+    lines.append(f"Run concluded: {timestamp}")
+    lines.append("=" * 70)
+
+    # 1. All Designs (full cleaned CFD dataset, pre-merge)
+    has_cp = df_cp is not None and not df_cp.empty and 'cp' in df_cp.columns
+    has_trf = df_trf is not None and not df_trf.empty and 'trf' in df_trf.columns
+    median_cp_all = df_cp['cp'].median() if has_cp else np.nan
+    median_trf_all = df_trf['trf'].median() if has_trf else np.nan
+    lines.append("\n[1] All Designs (Full Cleaned CFD Dataset)")
+    lines.append(f"    N (Cp measurements)   : {len(df_cp) if has_cp else 0}")
+    lines.append(f"    N (TRF measurements)  : {len(df_trf) if has_trf else 0}")
+    lines.append(f"    Median Cp             : {_fmt(median_cp_all)}")
+    lines.append(f"    Median TRF            : {_fmt(median_trf_all)}")
+
+    # 2. Pre-Optimization Baseline Pareto Front (raw, non-dominated CFD points)
+    has_raw_pareto = df_raw_pareto is not None and not df_raw_pareto.empty
+    median_cp_raw = df_raw_pareto['cp'].median() if has_raw_pareto else np.nan
+    median_trf_raw = df_raw_pareto['trf'].median() if has_raw_pareto else np.nan
+    lines.append("\n[2] Pre-Optimization Baseline Pareto Front (Raw CFD, Non-Dominated)")
+    lines.append(f"    N (designs)           : {len(df_raw_pareto) if has_raw_pareto else 0}")
+    lines.append(f"    Median Cp             : {_fmt(median_cp_raw)}")
+    lines.append(f"    Median TRF            : {_fmt(median_trf_raw)}")
+
+    # 3. Improved Designs (post-NSGA-II + SLSQP optimized Pareto front)
+    has_improved = df_pareto is not None and not df_pareto.empty
+    median_cp_improved = df_pareto['Pred_Cp'].median() if has_improved else np.nan
+    median_trf_improved = df_pareto['Pred_TRF'].median() if has_improved else np.nan
+    lines.append("\n[3] Improved Designs (Post-NSGA-II + SLSQP Optimized Pareto Front)")
+    lines.append(f"    N (designs)           : {len(df_pareto) if has_improved else 0}")
+    lines.append(f"    Median Cp             : {_fmt(median_cp_improved)}")
+    lines.append(f"    Median TRF            : {_fmt(median_trf_improved)}")
+    if not has_improved:
+        lines.append("    [Note] Optimizer did not return a valid Pareto front for this run.")
+
+    # Bonus: net change from the raw baseline Pareto front to the improved one
+    lines.append("\n[Delta] Baseline Pareto -> Improved Pareto")
+    if has_raw_pareto and has_improved and median_cp_raw != 0:
+        cp_delta = median_cp_improved - median_cp_raw
+        cp_pct = (cp_delta / abs(median_cp_raw)) * 100.0
+        lines.append(f"    Median Cp  Change     : {cp_delta:+.6f}  ({cp_pct:+.2f}%)")
+    else:
+        lines.append("    Median Cp  Change     : N/A")
+    if has_raw_pareto and has_improved and median_trf_raw != 0:
+        trf_delta = median_trf_improved - median_trf_raw
+        trf_pct = (trf_delta / abs(median_trf_raw)) * 100.0
+        lines.append(f"    Median TRF Change     : {trf_delta:+.6f}  ({trf_pct:+.2f}%)")
+    else:
+        lines.append("    Median TRF Change     : N/A")
+
+    lines.append("")  # blank line separating this entry from the next
+
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+    print(f" -> 📝 Median performance summary appended to: {os.path.abspath(log_path)}")
 
 def generate_raw_pareto_figure(df_merged, df_raw_pareto):
     """
@@ -190,9 +321,7 @@ def generate_raw_pareto_figure(df_merged, df_raw_pareto):
     os.makedirs("figures", exist_ok=True)
     filepath = os.path.join("figures", "Pareto_Front_Pre_Optimization_Raw.png")
     plt.tight_layout()
-    plt.savefig(filepath, dpi=300)
-    plt.close()
-    print(f"    Saved: {filepath}")
+    safe_savefig(filepath, dpi=300)
 
 def generate_optimized_pareto_figure(df_pareto):
     """
@@ -235,9 +364,7 @@ def generate_optimized_pareto_figure(df_pareto):
     os.makedirs("figures", exist_ok=True)
     filepath = os.path.join("figures", "Pareto_Front_Optimized.png")
     plt.tight_layout()
-    plt.savefig(filepath, dpi=300)
-    plt.close()
-    print(f"    Saved: {filepath}")
+    safe_savefig(filepath, dpi=300)
 
 def generate_pareto_comparison_figure(df_pareto, df_raw_pareto=None):
     """
@@ -253,7 +380,13 @@ def generate_pareto_comparison_figure(df_pareto, df_raw_pareto=None):
                  linewidth=1.5, markersize=7, alpha=0.75, label='Pre-NSGA-II Baseline Pareto (Raw CFD)')
     
     # 2. Post-NSGA-II Pareto Front (Optimized)
-    plt.plot(df_pareto['Pred_TRF'], df_pareto['Pred_Cp'], 's-', color='tab:blue', 
+    # FIX: df_pareto arrives sorted by Pred_Cp (descending), not Pred_TRF.
+    # Plotting a connected line in that order makes it zig-zag back and forth
+    # across the TRF axis, which visually hides points and makes the most
+    # recent run look sparse/incomplete next to the baseline. Sort by TRF
+    # (ascending) for the line only, matching how the baseline is plotted.
+    df_pareto_line = df_pareto.sort_values(by='Pred_TRF', ascending=True)
+    plt.plot(df_pareto_line['Pred_TRF'], df_pareto_line['Pred_Cp'], 's-', color='tab:blue', 
              linewidth=2, markersize=6, alpha=0.9, label='Post-NSGA-II Optimized Pareto')
     
     # Highlight extreme designs
@@ -286,9 +419,7 @@ def generate_pareto_comparison_figure(df_pareto, df_raw_pareto=None):
     os.makedirs("figures", exist_ok=True)
     filepath = os.path.join("figures", "Pareto_Front_Comparison.png")
     plt.tight_layout()
-    plt.savefig(filepath, dpi=300)
-    plt.close()
-    print(f"    Saved: {filepath}")
+    safe_savefig(filepath, dpi=300)
 
 def generate_historical_pareto_figure(current_df, history_dir):
     """
@@ -356,9 +487,89 @@ def generate_historical_pareto_figure(current_df, history_dir):
     os.makedirs("figures", exist_ok=True)
     filepath = os.path.join("figures", "Pareto_Historical_Evolution.png")
     plt.tight_layout()
-    plt.savefig(filepath, dpi=300)
-    plt.close()
-    print(f"    Saved: {filepath}")
+    safe_savefig(filepath, dpi=300)
+
+def generate_historical_vs_baseline_figure(df_raw_pareto, current_df, history_dir):
+    """
+    Stage 14, Plot 3b: Combines every historical optimized Pareto front (color-coded
+    oldest -> newest) with the Pre-Optimization Baseline Pareto Front (raw CFD),
+    in the same spirit as generate_pareto_comparison_figure but across ALL
+    archived runs rather than just the current one. This answers "has the
+    optimizer, across every run so far, actually moved past the raw CFD
+    baseline?" rather than just "did today's run beat the baseline?"
+    """
+    print(" -> Generating Historical Runs vs. Baseline Pareto Front Plot...")
+
+    plt.figure(figsize=(10, 7))
+
+    all_cp_for_scaling = []
+
+    # 1. Pre-Optimization Baseline Pareto Front (Raw CFD, non-dominated)
+    if df_raw_pareto is not None and not df_raw_pareto.empty:
+        df_raw_sorted = df_raw_pareto.sort_values(by='trf', ascending=True)
+        plt.plot(df_raw_sorted['trf'], df_raw_sorted['cp'], 'o--', color='tab:gray',
+                  linewidth=1.5, markersize=7, alpha=0.85, zorder=2,
+                  label='Pre-Optimization Baseline Pareto (Raw CFD)')
+        all_cp_for_scaling.extend(df_raw_sorted['cp'].tolist())
+
+    # 2. Every historical optimized Pareto front, color-coded by recency
+    # String sorting orders the YYYYMMDD_HHMMSS timestamps chronologically
+    history_files = sorted(glob.glob(os.path.join(history_dir, "*.csv")))
+    n_hist = len(history_files)
+    cmap = plt.colormaps['cool']
+
+    for i, file in enumerate(history_files):
+        try:
+            hist_df = pd.read_csv(file)
+            if 'Pred_TRF' not in hist_df.columns or 'Pred_Cp' not in hist_df.columns:
+                continue
+
+            # Filter out early initialization noise (very low Cp outputs), matching
+            # the threshold used in generate_historical_pareto_figure
+            valid_idx = hist_df['Pred_Cp'] >= 0.35
+            if not valid_idx.any():
+                continue
+
+            color = cmap(i / max(1, n_hist - 1))
+            plt.scatter(hist_df.loc[valid_idx, 'Pred_TRF'], hist_df.loc[valid_idx, 'Pred_Cp'],
+                        color=color, s=50, alpha=0.5, edgecolor='none', zorder=3)
+            all_cp_for_scaling.extend(hist_df.loc[valid_idx, 'Pred_Cp'].tolist())
+        except Exception:
+            pass  # Ignore corrupted or unrelated CSVs
+
+    # Recency colorbar in place of a per-run legend (there could be many runs)
+    if n_hist > 0:
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0, max(1, n_hist - 1)))
+        sm.set_array([])
+        cbar = plt.colorbar(sm, ax=plt.gca(), pad=0.02)
+        cbar.set_label(f'Historical Run Recency (n={n_hist})', fontsize=11)
+        cbar.set_ticks([0, max(1, n_hist - 1)])
+        cbar.set_ticklabels(['Oldest', 'Newest'])
+
+    # 3. Highlight the current run distinctly on top (it's also included in the
+    # cool-colored historical scan above since it's archived before this runs,
+    # but the solid line makes it easy to pick out from the rest at a glance)
+    if current_df is not None and not current_df.empty:
+        df_curr_sorted = current_df.sort_values(by='Pred_TRF', ascending=True)
+        plt.plot(df_curr_sorted['Pred_TRF'], df_curr_sorted['Pred_Cp'], 's-', color='crimson',
+                  linewidth=2, markersize=6, alpha=0.95, zorder=4, label='Current Run (Optimized Pareto)')
+        all_cp_for_scaling.extend(df_curr_sorted['Pred_Cp'].tolist())
+
+    plt.title("Historical Optimization Runs vs. Pre-Optimization Baseline", fontsize=15, fontweight='bold')
+    plt.xlabel(r"Torque Ripple Factor (TRF) $\leftarrow$ Lower is Better", fontsize=12)
+    plt.ylabel(r"Power Coefficient ($C_p$) $\rightarrow$ Higher is Better", fontsize=12)
+
+    if all_cp_for_scaling:
+        cp_min, cp_max = np.min(all_cp_for_scaling), np.max(all_cp_for_scaling)
+        cp_margin = max((cp_max - cp_min) * 0.10, 0.005)
+        plt.ylim(cp_min - cp_margin, cp_max + cp_margin)
+
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend(loc='lower right')
+
+    filepath = os.path.join("figures", "Historical_Runs_vs_Baseline.png")
+    plt.tight_layout()
+    safe_savefig(filepath, dpi=300)
 
 def generate_hypervolume_figure(hv_history):
     """
@@ -385,9 +596,7 @@ def generate_hypervolume_figure(hv_history):
     os.makedirs("figures", exist_ok=True)
     filepath = os.path.join("figures", "Hypervolume_Convergence.png")
     plt.tight_layout()
-    plt.savefig(filepath, dpi=300)
-    plt.close()
-    print(f"    Saved: {filepath}")
+    safe_savefig(filepath, dpi=300)
 
 def generate_parallel_coordinates_figure(df_pareto):
     """
@@ -446,9 +655,7 @@ def generate_parallel_coordinates_figure(df_pareto):
     
     os.makedirs("figures", exist_ok=True)
     filepath = os.path.join("figures", "Parallel_Coordinates_Design_Space.png")
-    plt.savefig(filepath, dpi=300)
-    plt.close()
-    print(f"    Saved: {filepath}")
+    safe_savefig(filepath, dpi=300)
 
 def generate_contour_heatmaps(cp_builder, trf_builder, df_cp, fixed_twist=0.0, fixed_tsr=2.5):
     """
@@ -504,9 +711,7 @@ def generate_contour_heatmaps(cp_builder, trf_builder, df_cp, fixed_twist=0.0, f
     os.makedirs("figures", exist_ok=True)
     filepath = os.path.join("figures", "Surrogate_Contour_Heatmaps.png")
     plt.tight_layout()
-    plt.savefig(filepath, dpi=300)
-    plt.close()
-    print(f"    Saved: {filepath}")
+    safe_savefig(filepath, dpi=300)
 
 def virtual_wind_tunnel(cp_surrogate, trf_surrogate):
     """
@@ -575,9 +780,18 @@ def main():
     if df_cp.empty or df_trf.empty:
         print("\n[Error] Failed to load sufficient data. Please check data files and config.py bounds.")
         sys.exit(1)
-        
+
+    # FIX: Compute the raw baseline Pareto front up front (it only needs df_cp/df_trf,
+    # not the trained surrogates or the optimizer). Previously this was computed only
+    # inside the "if df_pareto is not None" block below, which meant a failed
+    # optimization run had no baseline data available for the run summary log.
+    df_merged_raw, df_raw_pareto = extract_raw_pareto_front(df_cp, df_trf)
+
     # 2. Gaussian Process Training & Validation
     cp_builder, trf_builder = surrogates.build_surrogates(df_cp, df_trf)
+
+    # 2.5. Run Web Wind Tunnel
+    web_wind_tunnel.run_web_tunnel(cp_builder, trf_builder, df_cp, background=True)
     
     # 3. Generate Diagnostics & Publication Figures
     print("\n[Stage 14] Generating Publication Figures...")
@@ -607,13 +821,18 @@ def main():
         df_pareto.to_csv(pareto_path, index=False)
         print(f" -> 💾 Latest Pareto front exported to: {pareto_path}")
         
-        df_merged_raw, df_raw_pareto = extract_raw_pareto_front(df_cp, df_trf)
         generate_raw_pareto_figure(df_merged_raw, df_raw_pareto)
         generate_optimized_pareto_figure(df_pareto)
         generate_pareto_comparison_figure(df_pareto, df_raw_pareto)
         generate_historical_pareto_figure(df_pareto, history_dir)
+        generate_historical_vs_baseline_figure(df_raw_pareto, df_pareto, history_dir)
         generate_parallel_coordinates_figure(df_pareto)
         generate_hypervolume_figure(hv_history)
+
+    # Stage 15: Median Performance Log
+    # FIX: Runs unconditionally (even if df_pareto is None) so every concluded
+    # run -- successful or not -- gets a dated entry appended to the same log.
+    log_median_performance_summary(df_cp, df_trf, df_raw_pareto, df_pareto, output_dir="output")
     
     # 6. Enter Interactive Mode
     virtual_wind_tunnel(cp_builder, trf_builder)

@@ -120,7 +120,7 @@ class SurrogateBuilder:
         
         # Cap large dataset size to avoid O(N^3) Gaussian Process matrix inversion overhead
         if self.model_type == 'gp':
-            MAX_GP_SAMPLES = 10000 
+            MAX_GP_SAMPLES = 7000 
             X_train, y_train = self._cluster_and_sample(X_train, y_train, MAX_GP_SAMPLES, context_msg="(Final Training)")
         else:
             print(f" -> [Random Forest] Utilizing full training dataset: {len(X_train)} samples.")

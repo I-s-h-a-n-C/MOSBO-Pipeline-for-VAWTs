@@ -83,9 +83,12 @@ class RiskAwareVAWTProblem(ElementwiseProblem):
         # NSGA-II INEQUALITY CONSTRAINT
         # ---------------------------------------------------------
         # PyMoo expects constraints in the form G(x) <= 0.
-        # FIX: Relaxed the constraint boundary from 1.3 to 2.0 to prevent 
-        # massive numerical cliffs and premature convergence in the design space.
-        out["G"] = [penalized_trf - 2.0]
+        # FIX: Now driven by config.TRF_PARETO_LIMIT so this matches the
+        # SLSQP constraint below AND the final export filter. Previously
+        # this was hardcoded to 2.0 while the final export filtered at 1.5,
+        # which silently discarded a large portion of the optimizer's
+        # output (especially high-Cp designs) before plotting/export.
+        out["G"] = [penalized_trf - config.TRF_PARETO_LIMIT]
 
 def scalarized_objective(x, cp_surrogate, trf_surrogate, weight_cp):
     """
@@ -218,10 +221,12 @@ def run_optimization(cp_surrogate, trf_surrogate, df_cp):
             local_bounds.append((l_min, l_max))
         
         # SLSQP Inequality Constraint is formulated as fun(x) >= 0.
-        # FIX: Relaxed constraint from 1.3 to 2.0 to give SLSQP gradient breathing room.
+        # FIX: Now driven by config.TRF_PARETO_LIMIT to match the NSGA-II
+        # constraint and the final export filter (previously hardcoded to
+        # 2.0, which let SLSQP refine points that would later be dropped).
         def trf_constraint(x_val):
             t_pred, t_sig = trf_surrogate.predict(np.array([x_val[0:3]]))
-            return 2.0 - (t_pred[0] + config.LAMBDA_PENALTY * t_sig[0])
+            return config.TRF_PARETO_LIMIT - (t_pred[0] + config.LAMBDA_PENALTY * t_sig[0])
         
         opt_res = scipy_minimize(
             scalarized_objective,
@@ -257,8 +262,10 @@ def run_optimization(cp_surrogate, trf_surrogate, df_cp):
     df_pareto = pd.DataFrame(results)
     
     # HARD FILTER: Drop any designs where SLSQP slightly overstepped the boundary.
-    # FIX: Set to 1.5 to provide a slightly wider, more realistic Pareto neighborhood.
-    df_pareto = df_pareto[(df_pareto['Pred_TRF'] <= 1.5) & (df_pareto['Pred_Cp'] >= 0.35)]
+    # FIX: Now uses config.TRF_PARETO_LIMIT (same value enforced during NSGA-II
+    # and SLSQP above), so this only trims genuine SLSQP overshoot rather than
+    # discarding a whole band of legitimately-optimized designs.
+    df_pareto = df_pareto[(df_pareto['Pred_TRF'] <= config.TRF_PARETO_LIMIT) & (df_pareto['Pred_Cp'] >= 0.35)]
     
     # Sort by raw aerodynamic performance for a logical top-to-bottom export
     df_pareto = df_pareto.sort_values(by='Pred_Cp', ascending=False).reset_index(drop=True)
